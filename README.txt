@@ -2,9 +2,6 @@
 The Linux I/O Path
 ==================
 
-  Script zur Vorlesung am 25.04.2019
-    Andreas Grapentin
-
 Vorwort
 -------
 
@@ -76,7 +73,7 @@ kleines I/O Programm erzeugt:
  | $> strace ./file_io
  | [...]
  | openat(AT_FDCWD, "out.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3
- | fstat(3, {st_mode=S_IFREG|0644, st_size=0, ...}) = 0
+ | [...]
  | write(3, "hello, world\n", 13)          = 13
  | close(3)                                = 0
  | [...]
@@ -99,7 +96,7 @@ Symbole aus dem Programm laden, und uns eine Kommandozeile bereitstellen:
 
  | $> gdb ./file_io
  | [...]
- | Reading symbols from ./file_io...done.
+ | Reading symbols from ./file_io...
  | (gdb)
 
 Starten wir das Programm mit dem Befehl `start', wird der Debugger die
@@ -137,10 +134,11 @@ untersuchen:
  | Catchpoint 2 (call to syscall brk), 0x00007ffff7eb2b9b in brk () from /usr/lib/libc.so.6
 
 Zuerst sehen wir, durch wiederholtes Ausführen des `continue' Befehls, zwei
-`brk' Systemaufrufe. Diese Funkion wird für dynamische Speicherverwaltung
+`brk' Systemaufrufe. (Eventuell taucht bei neueren glibc Versionen auch ein
+getrandom Aufruf auf.) Diese Funkion wird für dynamische Speicherverwaltung
 benutzt und ist ein Indiz dafür, dass die C Standardbibliothek dynamischen
 Speicher zum Herstellen der zurückgegeben FILE* Zeiger in der `fopen' Funktion
-verwendet.
+verwendet. Siehe dazu auch `man 2 brk`.
 
 Tatsächlich kann man sehen, wenn man sich mit dem Befehl `back' den
 /Stacktrace/ des Prozesses anzeigen lässt, dass wir uns gerade in der
@@ -160,21 +158,25 @@ des Heaps zu modifizieren. Damit hat sich die Vermutung also bestätigt:
  | #7  0x00007ffff7e31580 in __fopen_internal () from /usr/lib/libc.so.6
  | #8  0x0000555555555164 in main () at test.c:4
 
+Dieser Stacktrace kann je nach Verfügbarkeit von Debug Informationen, sowie der
+Versionen der verwendeten Systembibliotheken etwas anders aussehen.
+
 Setzen wir die Programmausführung mit dem `continue' Befehl fort, erreichen wir
 den Systemaufruf `openat'. Ein Stacktrace wird zeigen, dass wir noch immer die
 Funktion `fopen' abarbeiten, was zu erwarten war. Danach erreichen wir den
-Systemaufruf `fstat', welcher von der `fwrite' Funktion aufgerufen wird. Der
-Systemaufruf `fstat' wird für einen gültigen Dateideskriptor die Eigenschaften
-der dahinter liegenden Datei auslesen und zurückgeben. Diese Informationen
-werden intern von der `fwrite' Funktion verwendet.
+Systemaufruf `fstat' (bzw. das neuere `newfstatat') welcher von der `fwrite'
+Funktion aufgerufen wird. Der Systemaufruf `fstat' wird für einen gültigen
+Dateideskriptor die Eigenschaften der dahinter liegenden Datei auslesen und
+zurückgeben. Diese Informationen werden intern von der `fwrite' Funktion
+verwendet.
 
 Setzen wir die Ausführung mit dem `continue' Befehl noch weiter fort, dann
 passiert etwas nicht sofort trivial offensichtliches. Der Debugger wird wie
-erwartet am nächsten Systemaufruf -- dem Systemaufruf `write' (#0) -- stoppen,
-aber dieser Systemaufruf wurde von `fclose' (#5) ausgelöst, und nicht von
-`fwrite'. Man kann also sehen, dass `fwrite' gar nicht notwendigerweise die zu
-schreibenden Daten direkt dem Betriebssystem übergibt, sondern die Daten
-zwischenpuffert:
+erwartet am nächsten Systemaufruf -- dem Systemaufruf `write' (Frame #0 im
+folgenden Stacktrace) -- stoppen, aber dieser Systemaufruf wurde von `fclose'
+(#5) ausgelöst, und nicht von `fwrite'. Man kann also sehen, dass `fwrite' gar
+nicht notwendigerweise die zu schreibenden Daten direkt dem Betriebssystem
+übergibt, sondern die Daten zwischenpuffert:
 
  | Catchpoint 2 (call to syscall write), 0x00007ffff7eaccc8 in write () from /usr/lib/libc.so.6
  | (gdb) back
@@ -201,6 +203,7 @@ Programm von vorher könnte dann wiefolgt aussehen:
  | $> cat sys_io.c
  | #include <fcntl.h>
  | #include <unistd.h>
+ | #include <string.h>
  |
  | int main(void) {
  |   int fd = open("out.txt", O_CREAT | O_RDWR | O_TRUNC, 0666);
@@ -213,8 +216,27 @@ Dieses Programm zeigt zu dem vorherigen Programm identisches beobachtbares
 Verhalten. Wiederholen wir allerdings analog zu vorher die Untersuchungen mit
 `strace' und `gdb', werden wir feststellen, dass die Abbildung zwischen den
 aufgerufenen Funktionen in der C Standardbibliothek und den ausgelösten
-Systemaufrufen viel direkter ist, und dass `write' auch tatsächlich einen
-`write' Systemaufruf direkt zur Folge hat.
+Systemaufrufen viel direkter ist, und dass zum Beispiel ein Aufruf von `open'
+auch tatsächlich einen direkten `openat' Systemaufruf direkt zur Folge hat:
+
+ | $> gcc -o sys_io sys_io.c -g
+ | $> gdb ./sys_io
+ | [...]
+ | Reading symbols from ./sys_io...
+ | (gdb) start
+ | [...]
+ | Temporary breakpoint 1, main () at sys_io.c:6
+ | 6      int fd = open("out.txt", O_CREAT | O_RDWR | O_TRUNC, 0666);
+ | (gdb) catch syscall
+ | Catchpoint 2 (any syscall)
+ | (gdb) c
+ | Continuing.
+ |
+ | Catchpoint 2 (call to syscall openat), 0x00007ffff7eb2b9b in open () from /usr/lib/libc.so.6
+ | (gdb) back
+ | #0  0x00007ffff7e9e8d8 in __libc_open64 (file=0x555555556004 "out.txt", 
+ |     oflag=578) at ../sysdeps/unix/sysv/linux/open64.c:41
+ | #1  0x000055555555518f in main () at sys_io.c:6
 
 Ein Blick in den Kernel
 -----------------------
@@ -259,6 +281,7 @@ Prozess preisgibt. Von konkretem Interesse ist das Verzeichnis `/proc/<pid>/fd'
 
  | $> gcc -o proc_io proc_io.c -g
  | $> ./proc_io
+ | <pid>
  | $> ls -lh /proc/<pid>/fd
  | total 0
  | lrwx------ 1 nobody nobody 64 Apr 26 01:25 0 -> /dev/pts/9
@@ -311,6 +334,7 @@ Objekt sich hinter einem Namen im Dateisystem verbirgt. Zum Beispiel:
  | $> stat /etc/passwd
  |   File: /etc/passwd
  |   Size: 1689         Blocks: 8          IO Block: 4096   regular file
+ |   [...]
 
 Weitere mögliche typen sind /sockets/, /symlinks/, /directories/ und /FIFOs/.
 (Siehe `man 7 inode')
@@ -319,10 +343,12 @@ Wir haben im `proc' Dateisystem `/proc/<pid>/fd' betrachtet, interessant ist
 außerdem noch `/proc/<pid>/fdinfo/':
 
  | $> ./proc_io
+ | <pid>
  | $> cat /proc/<pid>/fdinfo/3
- | pos: 14
- | flags:       0100002
- | mnt_id:      118
+ | pos:    14
+ | flags:  0100002
+ | mnt_id: 118
+ | ino:    80099916
  | $> exit
 
 Die Felder in dieser Datei -- wie auch für viele weitere Knoten im `proc'
@@ -331,6 +357,7 @@ Interessant ist das `mnt_id' Feld, dieses verweist auf einen Eintag in der
 `mountinfo' des Prozesses (`/proc/<pid>/mountinfo'):
 
  | $> ./proc_io
+ | <pid>
  | $> cat /proc/<pid>/mountinfo | grep 118
  | 118 26 8:5 / /home rw,relatime shared:65 - ext4 /dev/sda5 rw,data=ordered
  | $> exit
@@ -394,64 +421,41 @@ Die Komponenten werden dabei automatisch vorbereitet und übersetzt:
  | $> ./build --download-dependencies qemu-buildroot
 
 Diese Anweisung sind aus dem README des Projektes entnommen und müssen
-möglicherweise für neuere als meine verwendete Version des Projekts
-entsprechend angepasst werden. Ich empfehle, die "Getting Started" Sektion des
+möglicherweise für andere als meine verwendete Version des Projekts, bzw. auch zum Übersetzen auf nicht-unterstützten GNU/Linux Distributionen, neuereentsprechend angepasst werden. Ich empfehle, die "Getting Started" Sektion des
 READMEs zu lesen. Die von mir verwendete Version des Projekts ist:
 
  | $> git rev-parse HEAD
- | 550897ce1766e8df0b4ffcfdc17206f788d9f67f
+ | 3accfcda217e4a121d1948ee3a01eee99db5f47a
 
-Auf sehr neuen System kann es sein, dass für den Kernel sowie den
-Systememulator `qemu' Patches benötigt werden. Für Linux wird möglicherweise
-folgender Patch benötigt, falls beim Debuggen Probleme mit undefinierten MS_*
-Symbolen auftreten:
-
-https://www.spinics.net/lists/stable/msg290600.html
-
-Und falls beim Übersetzen von `qemu' Fehler bei der Verwendung von `glusterfs'
-auftreten, leisten folgende Patches abhilfe:
-
-https://git.qemu.org/?p=qemu.git;a=patch;h=e014dbe74e0484188164c61ff6843f8a04a8cb9d
-https://git.qemu.org/?p=qemu.git;a=patch;h=0e3b891fefacc0e49f3c8ffa3a753b69eb7214d2
-
-Auf Ubuntu Systemen sind diese Patches üblicherweise nicht nötig, auf meinem
+Auf manchen System kann es sein, dass für den Kernel sowie den Systememulator
+`qemu' oder andere Pakete der buildroot Umgebung Patches benötigt werden.  Auf
+Ubuntu Systemen sind diese Patches üblicherweise nicht nötig, auf meinem
 Archlinux System waren sie relevant. Die Scripts erwarten außerdem das
 `apt-get' Programm um wenige Systemweite Abhängigkeiten zu installieren. Auf
-Distributionen mit anderen Paketmanagern rate ich, ein /usr/local/bin/apt-get
-zu erstellen, mit folgendem Inhalt:
-
- | $> cat /usr/local/bin/apt-get
- | #!/bin/sh
- | true
-
-Die Aufrufe an apt-get werden von den Scripts auf der Konsole ausgegeben, und
-sicherzustellen, dass die überschaubare Menge von Abhängigkeiten installiert
-ist, ist trivial.
+Distributionen mit anderen Paketmanagern kann man dem build Script den
+Parameter `--no-apt' übergeben.
 
 Ist die Umgebung erfolgreich Übersetzt, wird die virtuelle Maschine mit
 folgendem Kommando im angehaltenen Zustand gestartet:
 
- | $> ./run --wait-gdb
+ | $> ./run --gdb
 
 Um die laufende virtuelle Maschine zu Beenden, muss -- wie von `qemu' gewohnt
 -- auf der Kommandozeile die Tastenkombination Ctrl+A gedrückt werden, gefolgt
 von der Taste x.
 
-Der Debugger wird in einem zweiten Terminal gestartet:
-
- | $> ./run-gdb start_kernel
-
+Der Debugger wird von `run' automatisch in einem zweiten Terminal gestartet,
 woraufhin Sowohl Kernel als auch Debugger in Tandem die Ausführung beginnen,
 und den Kernel bis zum Beginn der `start_kernel' Funktion ausführen, und dort
 die Ausführung anhalten.
 
- | $> ./run-gdb start_kernel
+ | $> ./run --gdb
  | [...]
  | Remote debugging using localhost:45457
  | [...]
  | Breakpoint 1, start_kernel ()
- |     at /home/nobody/linux-kernel-module-cheat/submodules/linux/init/main.c:538
- | 538  {
+ |     at /home/nobody/linux-kernel-module-cheat/submodules/linux/init/main.c:837
+ | 837  {
  | loading vmlinux
  | (gdb)
 
@@ -478,13 +482,14 @@ bis es eine Shell präsentiert.
  | [...]
  | <6>[    9.249814] Run /sbin/init as init process
  | hello S98
- | # echo $SHELL
+ | root@buildroot# echo $SHELL
  | /bin/sh
- | #
+ | root@buildroot#
 
 An diesem Punkt können wir das laufende System mit einem beherzten Ctrl+C im
 Debugger unterbrechen, um wieder Zugriff auf die Kommandozeile des Debuggers zu
-erhalten:
+erhalten. Wir unterbrechen dabei den Kern an einer beliebigen Stelle, an der er
+sich gerade herumbefindet:
 
  | ^C
  | Program received signal SIGINT, Interrupt.
@@ -515,7 +520,7 @@ jedem zukünftigen Aufruf des Systemaufrufs `openat' die Ausführung unterbroche
 werden. Dies ist erkennbar, wenn man das Programm `true' in der Kommandozeile
 ausführt:
 
- | # true
+ | root@buildroot# true
 
 Wenn alles richtig funktioniert, wird der Debugger die Ausführung mit folgender
 Ausgabe unterbrechen:
@@ -536,6 +541,7 @@ Funktionen die Interrupt Behandlung in Linux passiert:
  | #2  0xffffffff81800091 in entry_SYSCALL_64 ()
  |     at /home/nobody/linux-kernel-module-cheat/submodules/linux/arch/x86/entry/entry_64.S:175
  | #3  0x0000000000000000 in ?? ()
+ | [...] (ab hier wird der stacktrace unzuverlässig)
  | (gdb)
 
 Ich kann empfehlen, sich diese Funktionen mal anzusehen.
@@ -545,15 +551,14 @@ Befehl können wir uns den Quellcode der Funktion anzeigen lassen:
 
  | (gdb) list __x64_sys_openat
  | [...]
- | 1084 SYSCALL_DEFINE4(openat, int, dfd, const char __user *, filename, int, flags,
- | 1085                 umode_t, mode)
- | 1086 {
- | 1087         if (force_o_largefile())
- | 1088                 flags |= O_LARGEFILE;
- | (gdb) list
- | 1089
- | 1090         return do_sys_open(dfd, filename, flags, mode);
- | 1091 }
+ | 1195    SYSCALL_DEFINE4(openat, int, dfd, const char __user *, filename, int, flags,
+ | 1196                    umode_t, mode)
+ | 1197    {
+ | 1198            if (force_o_largefile())
+ | 1199                    flags |= O_LARGEFILE;
+ | (gdb)
+ | 1200            return do_sys_open(dfd, filename, flags, mode);
+ | 1201    }
  | [...]
  | (gdb)
 
@@ -586,12 +591,13 @@ Informationen:
 
 Wir sehen, dass beim Start des `true' Programms von der Shell zwei Dateien
 geöffnet werden, und zwar `/.ash_history' und `/etc/passwd'. Wir ignorieren
-beide dieser Instanzen von `open' und führen stattdessen in der Shell folgendes
-Kommando aus, um eine Datei nicht nur zu öffnen, sondern auch zu schreiben, und
-unser C Programm zu simulieren, welches wir im User Modus genau betrachtet
-hatten:
+beide dieser Instanzen von `open' durch wiederholtes Verwenden des `continue'
+Befehls in der gdb Eingabeaufforderung, und führen stattdessen in der Shell
+folgendes Kommando aus, um eine Datei nicht nur zu öffnen, sondern auch zu
+schreiben, und unser C Programm zu simulieren, welches wir im User Modus genau
+betrachtet hatten:
 
- | # echo 'hello, world' > out.txt
+ | root@buildroot# echo 'hello, world' > out.txt
 
 Der Debugger wird die Ausführung wieder anhalten, und wir fahren solange mit
 der Ausführung durch Verwendung des `continue' Befehls fort, bis der `filename'
@@ -607,18 +613,19 @@ Parameter der `do_sys_open' Funktion unserer Datei `out.txt' entspricht:
  | 1049 {
  | (gdb)
 
-Den Quellcode der do_sys_open Funktion erhält man wieder wahlweise durch
-Verwendung des `list' Befehls im Debugger, oder durch direktes Öffnen der Datei
-`fs/open.c' im Linux Kernel. Es folgt eine von mir kommentierte Version zum
-Verständnis:
+do_sys_open ist widerum ein Wrapper für do_sys_openat2. Den Quellcode der
+do_sys_openat2 Funktion erhält man wieder wahlweise durch Verwendung des `list'
+Befehls im Debugger, oder durch direktes Öffnen der Datei `fs/open.c' im Linux
+Kernel. Es folgt eine von mir kommentierte Version zum Verständnis:
 
- | long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
+ | long do_sys_openat2(int dfd, const char __user *filename,
+ |                     struct open_how *how)
  | {
  |         /* interpretiere die gegebenen `flags' und erzeuge eine
  |          * `struct open_flags' Struktur (vgl. `ptype struct open_flags' im
  |          * Debugger) */
  |         struct open_flags op;
- |         int fd = build_open_flags(flags, mode, &op);
+ |         int fd = build_open_flags(how, &op);
  |         struct filename *tmp;
  |
  |         /* falls `build_open_flags' fehlschlägt, ist fd != 0 und enthält
@@ -638,6 +645,7 @@ Verständnis:
  |         if (fd >= 0) {
  |                 /* versuche die Datei zu öffnen, und behandle Fehler */
  |                 struct file *f = do_filp_open(dfd, tmp, &op);
+ |
  |                 if (IS_ERR(f)) {
  |                         put_unused_fd(fd);
  |                         fd = PTR_ERR(f);
@@ -650,14 +658,14 @@ Verständnis:
  |         return fd;
  | }
 
-Der Funktionsaufruf `do_filp_open' erzeugt eine `struct file' Struktur, welche
-viele Interessante Details zu der geöffneten Datei, sowie weitere Verweise auf
-Kernelstrukturen des I/O Systems (vgl. `ptype struct file') enthält. Um die
-Ausführung bis in diese interessante Funktion fortzuführen, nutzt man die
-Befehle `next' (Step Over) und `step' (Step Into), bis der Funktionsaufruf
-`do_filp_open' erreicht ist, und betritt dann mit dem Befehl `step' die
-Funktion. Altenativ bietet es sich an, durch den Befehl `b do_filp_open' einen
-weiteren Breakpoint zu setzen.
+Der Funktionsaufruf `do_filp_openat2' erzeugt eine `struct file' Struktur,
+welche viele Interessante Details zu der geöffneten Datei, sowie weitere
+Verweise auf Kernelstrukturen des I/O Systems (vgl. `ptype struct file')
+enthält. Um die Ausführung bis in diese interessante Funktion fortzuführen,
+nutzt man die Befehle `next' (Step Over) und `step' (Step Into), bis der
+Funktionsaufruf `do_filp_open' erreicht ist, und betritt dann mit dem Befehl
+`step' die Funktion. Altenativ bietet es sich an, durch den Befehl `b
+do_filp_open' einen weiteren Breakpoint zu setzen.
 
 Der Inhalt der Funktion `do_filp_open' ist überschaubar. Als einzig
 interessante Unterfunktion lässt sich `path_openat' identifizieren.
@@ -740,7 +748,7 @@ gdb cheat sheet:
 
 
 ==============================================================================
-Copyright 2019 Andreas Grapentin <andreas.grapentin@hpi.uni-potsdam.de>
+Copyright 2022 Andreas Grapentin <andreas.grapentin@hpi.uni-potsdam.de>
 
 Dieses Dokument ist veröffentlicht unter der Creative Commons Attribution 4.0
 International License (CC-by) Lizenz.
